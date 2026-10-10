@@ -1,19 +1,20 @@
 /**
- * The heartbeat's dead-man switch.
+ * A dead-man switch for the daemon's lifecycle work: one guards the boot
+ * (main.ts), and one each lifecycle loop's pass (heartbeat.ts).
  *
- * Why it exists (2026-08-13, Beijing production): the heartbeat is a chain —
- * each tick schedules the next only after it finishes — so a single await
- * that never settles kills reconciliation and idle cooling forever, with no
+ * Why it exists (2026-08-13, Beijing production): the heartbeat was a chain —
+ * each tick scheduled the next only after it finished — so a single await
+ * that never settled killed reconciliation and idle cooling forever, with no
  * error to catch: try/catch hears failures, not silence. The daemon looked
  * healthy the whole time (the metrics sampler ticks on its own timer) while
  * zero freezes happened for eleven hours and 643 sandboxes piled up active.
  * Per-call deadlines (executor/deadline.ts) bound every await we know
  * about; the watchdog bounds the ones we don't.
  *
- * It watches progress, not tick duration: a backlog sweep that freezes
+ * It watches progress, not pass duration: a backlog sweep that freezes
  * hundreds of sandboxes legitimately runs for a long time but beats on
  * every row — and an archive transfer pulses on real bytes moving — while
- * a stuck tick beats on none. The stall limit therefore only needs to
+ * a stuck pass beats on none. The stall limit therefore only needs to
  * exceed the longest single *silent* step (a docker verb, itself
  * deadline-bounded), not the longest sweep or transfer.
  *

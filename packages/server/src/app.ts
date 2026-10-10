@@ -1,6 +1,10 @@
 import http from 'node:http';
 import nodePath from 'node:path';
-import { GATEWAY_ONLY_VERBS } from '@dormice/shared';
+import {
+  GATEWAY_ONLY_VERBS,
+  type LifecycleHealth,
+  lifecycleHealthSchema,
+} from '@dormice/shared';
 import fastify, {
   type FastifyError,
   type FastifyServerFactory,
@@ -69,6 +73,12 @@ export interface AppDeps {
    * tests must never reach the network by accident.
    */
   updater?: Updater;
+  /**
+   * The two lifecycle loops' health (heartbeat.ts), which /healthz answers
+   * alongside its "ok". The daemon wires its Heartbeat; a test without one
+   * gets the plain "ok" the probe has always answered.
+   */
+  lifecycleHealth?: () => LifecycleHealth;
 }
 
 /**
@@ -116,6 +126,7 @@ export function buildApp({
     statusDir: nodePath.join(config.DORMICE_DATA_DIR, 'upgrade'),
     unavailable: fakeExecutorUnavailable(config.DORMICE_EXECUTOR),
   }),
+  lifecycleHealth,
 }: AppDeps) {
   // Always a pino instance (booleans are normalized into one): two fastify()
   // call shapes would give the instance two different types.
@@ -232,17 +243,27 @@ export function buildApp({
   });
 
   // Liveness probe: open by design (probes have no secrets), everything
-  // else lives behind the token.
+  // else lives behind the token. 200 means "the daemon serves"; how its
+  // lifecycle loops are doing rides along as data, never as the status:
+  // an install.sh or systemd watching this probe must not read a
+  // reconciliation slowed by a busy dockerd as a dead daemon and restart
+  // it — the restart would only add a boot's container list to the load.
   app.get(
     '/healthz',
     {
       schema: {
         response: {
-          200: z.object({ status: z.literal('ok') }),
+          200: z.object({
+            status: z.literal('ok'),
+            lifecycle: lifecycleHealthSchema.optional(),
+          }),
         },
       },
     },
-    async () => ({ status: 'ok' as const }),
+    async () => ({
+      status: 'ok' as const,
+      ...(lifecycleHealth ? { lifecycle: lifecycleHealth() } : {}),
+    }),
   );
 
   // The one adjudication of "does this bare credential open the door":

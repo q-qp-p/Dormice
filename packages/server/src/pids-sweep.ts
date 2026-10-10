@@ -57,7 +57,7 @@ export async function sweepPidsLimit(
   db: Db,
   executor: Executor,
   locks: KeyedQueue,
-  /** Called once per row considered — the heartbeat watchdog's evidence of progress. */
+  /** Called once per row considered — the boot watchdog's evidence of progress. */
   onProgress?: () => void,
 ): Promise<PidsSweep> {
   const result: PidsSweep = {

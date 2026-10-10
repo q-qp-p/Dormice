@@ -38,8 +38,8 @@ export function imageTests(ctx: ContractContext) {
           { path: 'kept.txt', content: Buffer.from('survives the swap') },
         ]);
         await ctx.executor.freeze(id);
+        // stop() removes the shell; the start after it builds a new one.
         await ctx.executor.stop(id);
-        await ctx.subject.vanishContainer(id);
         // The rebuild is where a new image takes effect: new shell, old disk.
         await ctx.executor.start(id, { image: ctx.subject.altImage });
         expect(await ctx.subject.imageOf(id)).toBe(ctx.subject.altImage);
@@ -52,11 +52,10 @@ export function imageTests(ctx: ContractContext) {
     it(
       'starting an existing container never changes its image',
       async () => {
-        const id = await ctx.fresh();
-        await ctx.executor.freeze(id);
-        await ctx.executor.stop(id);
-        // The exited container object still exists — start only starts it;
-        // the image asked for here must be ignored, not applied.
+        // A shell that died on its own: its exited container still exists
+        // — start only starts it; the image asked for here must be
+        // ignored, not applied.
+        const id = await ctx.freshExited();
         await ctx.executor.start(id, { image: ctx.subject.altImage });
         expect(await ctx.subject.imageOf(id)).toBe(ctx.subject.baseImage);
       },
@@ -64,15 +63,16 @@ export function imageTests(ctx: ContractContext) {
     );
 
     it(
-      'imageOf reads the born image in any state, stopped included',
+      'imageOf reads the born image in any state, exited included',
       async () => {
         const id = await ctx.fresh({ image: ctx.subject.altImage });
         expect(await ctx.executor.imageOf(id)).toBe(ctx.subject.altImage);
         await ctx.executor.freeze(id);
         expect(await ctx.executor.imageOf(id)).toBe(ctx.subject.altImage);
-        // The exited container is still the shell, and start would boot it
-        // as-is — so a stopped sandbox honestly reports the old image.
-        await ctx.executor.stop(id);
+        // A shell that died on its own is still the shell, and start would
+        // boot it as-is — so it honestly reports the old image.
+        await ctx.executor.unfreeze(id);
+        await ctx.subject.crashContainer(id);
         expect(await ctx.executor.imageOf(id)).toBe(ctx.subject.altImage);
       },
       timeoutMs,
@@ -83,11 +83,15 @@ export function imageTests(ctx: ContractContext) {
       async () => {
         const id = await ctx.fresh();
         await ctx.executor.freeze(id);
+        // stop() takes the shell; a death's exited shell can be pruned
+        // behind the daemon's back. Either way the disk survives, but an
+        // image is a property of the shell — with no shell there is nothing
+        // to report; the next start decides.
         await ctx.executor.stop(id);
-        await ctx.subject.vanishContainer(id);
-        // The disk survives, but an image is a property of the shell — with
-        // no shell there is nothing to report; the next start decides.
         expect(await ctx.executor.imageOf(id)).toBe(null);
+        const pruned = await ctx.freshExited();
+        await ctx.subject.vanishContainer(pruned);
+        expect(await ctx.executor.imageOf(pruned)).toBe(null);
         // An observation verb: an unknown sandbox is null too, not a throw.
         expect(await ctx.executor.imageOf('never-created')).toBe(null);
       },

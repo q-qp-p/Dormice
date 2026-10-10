@@ -352,7 +352,7 @@ export interface ShellExit {
    * When the shell's init exited, ISO-8601 at millisecond precision — the
    * runtime's own record of the death (Docker's State.FinishedAt), not the
    * moment the daemon noticed it. The reconciler notices within one
-   * heartbeat, a wake immediately; the wire's lastExit.at carries this.
+   * pass, a wake immediately; the wire's lastExit.at carries this.
    */
   finishedAt: string;
 }
@@ -413,7 +413,13 @@ export interface Executor {
   freeze(sandboxId: string): Promise<void>;
   /** Paused -> running. */
   unfreeze(sandboxId: string): Promise<void>;
-  /** Paused -> stopped: the processes die, the disk stays. */
+  /**
+   * Paused -> stopped: the processes die and the shell is removed, the
+   * disk stays — a stopped sandbox is its disk alone, and its next start
+   * builds a fresh shell around it. An exited shell is left only by a
+   * death the daemon did not order (exitOf reads it); the reconciler
+   * removes it once the ledger has recorded the death.
+   */
   stop(sandboxId: string): Promise<void>;
   /**
    * Stopped -> running again, from the kept disk. The disk is required; the
@@ -443,9 +449,19 @@ export interface Executor {
   /**
    * Every container this executor knows about, with its observed state.
    * The reconciler's window into reality — the read the ledger is checked
-   * against at startup and on every heartbeat tick.
+   * against at startup and on every reconcile pass. The one read whose
+   * cost grows with the fleet (deadline.ts LIST_DEADLINE_SECONDS).
    */
   listContainers(): Promise<Map<string, ContainerState>>;
+  /**
+   * One container's state, read now — null when no container exists. The
+   * single-object twin of listContainers, at a fraction of its cost (one
+   * inspect, where the list grows with the fleet), and what the reconciler
+   * decides on: the list only nominates candidates, and an observation that
+   * is minutes old by the time its row's slot is free must not be what the
+   * ledger is overwritten with. A pure read, never a wake.
+   */
+  containerState(sandboxId: string): Promise<ContainerState | null>;
   /**
    * Every sandbox id that has a disk on this host, with or without a
    * container. A sandbox's reality is container plus disk; containers can

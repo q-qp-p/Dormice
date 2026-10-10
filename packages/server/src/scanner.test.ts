@@ -114,7 +114,9 @@ describe('idle scanner', () => {
       failures: [],
     });
     expect(findByName(db, 'alice')?.state).toBe('stopped');
-    expect(executor.stateOf(row.id)).toBe('stopped');
+    // Stopped is the disk alone: the shell went with its processes.
+    expect(executor.stateOf(row.id)).toBeUndefined();
+    expect(await executor.listDisks()).toContain(row.id);
   });
 
   it('moves one rung per sweep, even for a long-dead sandbox', async () => {

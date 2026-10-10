@@ -61,8 +61,8 @@ export function specTests(ctx: ContractContext) {
       async () => {
         const id = await ctx.fresh({ cpus: 0.5, memoryGb: 0.5 });
         await ctx.executor.freeze(id);
+        // stop() takes the shell, and the limits with it.
         await ctx.executor.stop(id);
-        await ctx.subject.vanishContainer(id);
         expect(await ctx.executor.limitsOf(id)).toBeNull();
         // The rebuild around the surviving disk is born with the NEW limits.
         await ctx.executor.start(id, { cpus: 0.25, memoryGb: 0.25 });
@@ -79,10 +79,10 @@ export function specTests(ctx: ContractContext) {
       'a surviving shell keeps its birth limits — start() only starts',
       async () => {
         const id = await ctx.fresh({ cpus: 0.5, memoryGb: 0.5 });
-        await ctx.executor.freeze(id);
-        await ctx.executor.stop(id);
-        // The container object still exists; the options apply only to the
-        // rebuild-from-disk path, so the old limits must survive.
+        // A shell that died on its own: the container object still exists;
+        // the options apply only to the rebuild-from-disk path, so the old
+        // limits must survive.
+        await ctx.subject.crashContainer(id);
         await ctx.executor.start(id, { cpus: 0.25, memoryGb: 0.25 });
         expect(await ctx.executor.limitsOf(id)).toEqual({
           nanoCpus: 500_000_000,

@@ -97,13 +97,22 @@ export function execTests(ctx: ContractContext) {
           ctx.executor.exec(paused, { command: 'echo hi', timeoutSeconds: 30 }),
         ).rejects.toThrow(/is paused, expected running/);
 
+        const exited = await ctx.freshExited();
+        await expect(
+          ctx.executor.exec(exited, {
+            command: 'echo hi',
+            timeoutSeconds: 30,
+          }),
+        ).rejects.toThrow(/is stopped, expected running/);
+
+        // Stopped by the daemon: the disk alone, no shell to run in.
         const stopped = await ctx.freshStopped();
         await expect(
           ctx.executor.exec(stopped, {
             command: 'echo hi',
             timeoutSeconds: 30,
           }),
-        ).rejects.toThrow(/is stopped, expected running/);
+        ).rejects.toThrow(/is absent, expected running/);
 
         await expect(
           ctx.executor.exec(randomUUID(), {

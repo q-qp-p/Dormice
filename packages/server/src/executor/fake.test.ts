@@ -8,6 +8,13 @@ describeExecutorContract('FakeExecutor', () => {
     executor,
     vanishContainer: async (sandboxId: string) =>
       executor.vanishContainer(sandboxId),
+    // What `docker kill` leaves on the real engine: 137, no OOM verdict.
+    crashContainer: async (sandboxId: string) =>
+      executor.crashContainer(sandboxId, {
+        exitCode: 137,
+        oomKilled: false,
+        runtimeDied: false,
+      }),
     baseImage: FAKE_BASE_IMAGE,
     // Any string: the fake plays whatever image it is asked to.
     altImage: 'fake-alt-image',

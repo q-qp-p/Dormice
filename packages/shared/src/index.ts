@@ -6,6 +6,7 @@ export * from './envd-token';
 export * from './exec';
 export * from './files';
 export * from './gateway';
+export * from './heartbeat';
 export * from './host';
 export * from './images';
 export * from './ingress';

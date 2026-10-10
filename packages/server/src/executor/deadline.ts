@@ -59,8 +59,25 @@ export function deadline<T>(
   ]).finally(() => clearTimeout(timer));
 }
 
-/** Pure reads: inspect, list, one stats sample (~1s by design). */
+/** Pure reads of one object: an inspect, one stats sample (~1s by design). */
 export const QUERY_DEADLINE_SECONDS = 30;
+
+/**
+ * The container list, the one read whose cost grows with the fleet:
+ * dockerd resolves the image of every container it lists, one at a time
+ * per worker (daemon/list.go refreshImage, Docker 29.6.2; under the
+ * containerd image store about ten containerd calls each, one of them a
+ * scan of the whole image table, and no cache). Measured on Beijing
+ * production: about 13 ms a container on 2026-09-11 (3,995 containers,
+ * 52-64 s), 34 ms on 2026-10-09 (2,600 containers, 88 s for this very
+ * call, 161 s for `docker ps -a` at the evening peak). Under the 30 s every
+ * single-object read is allowed, the list failed on every heartbeat for six
+ * hours that night. Ten minutes is several times the slowest list measured,
+ * and what it costs when dockerd loses an answer is one late repair: idle
+ * cooling does not wait behind the list (heartbeat.ts). The list given up
+ * on is aborted, so dockerd stops resolving images for a caller who left.
+ */
+export const LIST_DEADLINE_SECONDS = 600;
 
 /**
  * State changes: create, start, pause, unpause, kill, remove, exec

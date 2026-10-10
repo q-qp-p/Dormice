@@ -27,6 +27,17 @@ export interface ContractSubject {
    * and "destroy takes the leftover disk" must hold on both implementations.
    */
   vanishContainer(sandboxId: string): Promise<void>;
+  /**
+   * A running shell dies on its own — what the kernel's OOM killer or the
+   * pids cap does to a gVisor box: its processes gone, the exited
+   * container left behind with its disk. The fake flips its maps (exit
+   * 137, no OOM verdict); the docker subject kills the container straight
+   * through the engine. Part of the contract because a death the daemon
+   * did not order is the one way an exited shell exists — stop() removes
+   * its own — and exitOf, start's warm path and the shell-bound reads must
+   * hold on both implementations.
+   */
+  crashContainer(sandboxId: string): Promise<void>;
   /** The image shells boot from when create/start name none. */
   baseImage: string;
   /**
@@ -55,8 +66,10 @@ export interface ContractContext {
   timeoutMs: number;
   /** A fresh running sandbox, registered for after-test destruction. */
   fresh(opts?: CreateOptions): Promise<string>;
-  /** Walks a fresh sandbox down to stopped: exited container plus disk. */
+  /** Walks a fresh sandbox down to stopped: its disk alone — stop() removes the shell. */
   freshStopped(): Promise<string>;
+  /** A fresh sandbox whose shell died on its own: an exited container plus its disk. */
+  freshExited(): Promise<string>;
   stateOf(sandboxId: string): Promise<ContainerState | undefined>;
   /** Polls until the observation holds — real output has no fixed schedule. */
   until(check: () => boolean): Promise<void>;
@@ -120,6 +133,11 @@ export function describeExecutorContract(
         const sandboxId = await ctx.fresh();
         await executor.freeze(sandboxId);
         await executor.stop(sandboxId);
+        return sandboxId;
+      },
+      async freshExited() {
+        const sandboxId = await ctx.fresh();
+        await subject.crashContainer(sandboxId);
         return sandboxId;
       },
       async stateOf(sandboxId) {

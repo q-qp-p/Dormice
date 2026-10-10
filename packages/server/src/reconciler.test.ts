@@ -18,7 +18,9 @@ const NONE = {
   destroyedOrphans: 0,
   removedDisks: 0,
   archivedSwept: 0,
+  removedShells: 0,
   suspects: [],
+  failures: [],
 };
 
 function setup() {
@@ -128,19 +130,25 @@ describe('startup reconcile', () => {
     });
   });
 
-  it('a stop the daemon ordered itself is recorded as a SIGKILL, never as a death verdict', async () => {
+  it('a stop the daemon ordered itself is recorded as a stop, never as a death', async () => {
     const { db, executor, locks } = setup();
-    // Crash between executor.stop() and transition(): our own kill.
+    // Crash between executor.stop() and transition(): our own kill, which
+    // took the shell with it — no exited container is left to be read as
+    // a death the daemon did not order.
     const row = await seed(db, executor, 'alice');
     await executor.freeze(row.id);
     transition(db, row.id, 'frozen');
     await executor.stop(row.id);
 
-    await reconcile(db, executor, locks);
+    expect(await reconcile(db, executor, locks)).toEqual({
+      ...NONE,
+      repairedStates: 1,
+    });
     expect(findByName(db, 'alice')).toMatchObject({
       state: 'stopped',
-      lastExitCode: 137,
-      lastExitCause: 'exited',
+      lastExitAt: null,
+      lastExitCode: null,
+      lastExitCause: null,
     });
   });
 
@@ -159,14 +167,7 @@ describe('startup reconcile', () => {
     await executor.freeze(row.id);
     await executor.stop(row.id);
 
-    const result = await reconcile(
-      db,
-      executor,
-      locks,
-      undefined,
-      undefined,
-      watchers,
-    );
+    const result = await reconcile(db, executor, locks, { watchers });
     expect(result).toEqual({ ...NONE, repairedStates: 1 });
     expect(findByName(db, 'alice')?.state).toBe('stopped');
     expect(watchers.count(row.id)).toBe(0);
@@ -218,8 +219,13 @@ describe('startup reconcile', () => {
     // A crash between the archive's ledger write and its local cleanup:
     // the transition to archived IS the upload confirmation, so whatever is
     // still here is a stale copy — the sweep resumes the interrupted job.
-    await executor.freeze(row.id);
-    await executor.stop(row.id);
+    // The copy here is a whole one, the exited shell a death left beside
+    // the disk.
+    executor.crashContainer(row.id, {
+      exitCode: 137,
+      oomKilled: true,
+      runtimeDied: false,
+    });
     transition(db, row.id, 'frozen');
     transition(db, row.id, 'stopped');
     transition(db, row.id, 'archived');
@@ -236,12 +242,12 @@ describe('startup reconcile', () => {
   it('sweeps an archived row whose container is gone but disk remains', async () => {
     const { db, executor, locks } = setup();
     const row = await seed(db, executor, 'alice');
+    // stop() took the shell: the disk is all the interrupted cleanup left.
     await executor.freeze(row.id);
     await executor.stop(row.id);
     transition(db, row.id, 'frozen');
     transition(db, row.id, 'stopped');
     transition(db, row.id, 'archived');
-    executor.vanishContainer(row.id);
 
     expect(await reconcile(db, executor, locks)).toEqual({
       ...NONE,
@@ -322,8 +328,9 @@ describe('startup reconcile', () => {
     executor.plantDiskResidue(row.id);
     transition(db, row.id, 'restoring');
 
-    const result = await reconcile(db, executor, locks, new Set(), {
-      hasLiveRestore: () => true,
+    const result = await reconcile(db, executor, locks, {
+      priorSuspects: new Set(),
+      archiver: { hasLiveRestore: () => true },
     });
     expect(result).toEqual(NONE);
     expect(findByName(db, 'alice')?.state).toBe('restoring');
@@ -344,13 +351,11 @@ describe('startup reconcile', () => {
     await executor.create('orphan');
 
     expect(await reconcile(db, executor, locks)).toEqual({
+      ...NONE,
       // drifted -> frozen, pruned -> stopped (its disk keeps it alive).
       repairedStates: 2,
       deletedRows: 1,
       destroyedOrphans: 1,
-      removedDisks: 0,
-      archivedSwept: 0,
-      suspects: [],
     });
     expect(findByName(db, 'healthy')?.state).toBe('active');
     expect(findByName(db, 'drifted')?.state).toBe('frozen');
@@ -369,17 +374,16 @@ describe('runtime reconcile (two-strike orphans)', () => {
     // sabotage the very request creating it.
     await executor.create('maybe-in-flight');
 
-    const first = await reconcile(db, executor, locks, new Set());
+    const first = await reconcile(db, executor, locks, {
+      priorSuspects: new Set(),
+    });
     expect(first).toEqual({ ...NONE, suspects: ['maybe-in-flight'] });
     expect(executor.stateOf('maybe-in-flight')).toBe('running');
 
     // Still no row one interval later: genuinely unreachable, put it down.
-    const second = await reconcile(
-      db,
-      executor,
-      locks,
-      new Set(first.suspects),
-    );
+    const second = await reconcile(db, executor, locks, {
+      priorSuspects: new Set(first.suspects),
+    });
     expect(second).toEqual({ ...NONE, destroyedOrphans: 1 });
     expect(executor.stateOf('maybe-in-flight')).toBeUndefined();
   });
@@ -387,7 +391,9 @@ describe('runtime reconcile (two-strike orphans)', () => {
   it('clears a suspect whose row landed in the meantime', async () => {
     const { db, executor, locks } = setup();
     await executor.create('in-flight');
-    const first = await reconcile(db, executor, locks, new Set());
+    const first = await reconcile(db, executor, locks, {
+      priorSuspects: new Set(),
+    });
     expect(first.suspects).toEqual(['in-flight']);
 
     // The acquire finished: the row is in the ledger now.
@@ -398,12 +404,9 @@ describe('runtime reconcile (two-strike orphans)', () => {
       policy: DEFAULT_LIFECYCLE_POLICY,
     });
 
-    const second = await reconcile(
-      db,
-      executor,
-      locks,
-      new Set(first.suspects),
-    );
+    const second = await reconcile(db, executor, locks, {
+      priorSuspects: new Set(first.suspects),
+    });
     expect(second).toEqual(NONE);
     expect(executor.stateOf('in-flight')).toBe('running');
     expect(findByName(db, 'alice')?.state).toBe('active');
@@ -415,7 +418,9 @@ describe('runtime reconcile (two-strike orphans)', () => {
     executor.vanishContainer(row.id);
     await executor.removeDisk(row.id);
 
-    const result = await reconcile(db, executor, locks, new Set());
+    const result = await reconcile(db, executor, locks, {
+      priorSuspects: new Set(),
+    });
     expect(result).toEqual({ ...NONE, deletedRows: 1 });
     expect(findByName(db, 'alice')).toBeUndefined();
   });
@@ -436,14 +441,18 @@ describe('runtime reconcile (two-strike orphans)', () => {
         }),
     );
 
-    const result = await reconcile(db, executor, locks, new Set());
+    const result = await reconcile(db, executor, locks, {
+      priorSuspects: new Set(),
+    });
     expect(result.repairedStates).toBe(0);
     expect(findByName(db, 'alice')?.state).toBe('active');
 
     release();
     await holder;
     // Next tick, with the key free, the repair lands.
-    const next = await reconcile(db, executor, locks, new Set());
+    const next = await reconcile(db, executor, locks, {
+      priorSuspects: new Set(),
+    });
     expect(next).toEqual({ ...NONE, repairedStates: 1 });
     expect(findByName(db, 'alice')?.state).toBe('frozen');
   });
@@ -453,7 +462,9 @@ describe('disk reconcile', () => {
   it('leaves the disks of living sandboxes alone', async () => {
     const { db, executor, locks } = setup();
     const row = await seed(db, executor, 'alice');
-    expect(await reconcile(db, executor, locks, new Set())).toEqual(NONE);
+    expect(
+      await reconcile(db, executor, locks, { priorSuspects: new Set() }),
+    ).toEqual(NONE);
     expect(await executor.listDisks()).toContain(row.id);
   });
 
@@ -462,16 +473,15 @@ describe('disk reconcile', () => {
     // Crash between provisioning the disk and creating the container.
     executor.plantDiskResidue('half-created');
 
-    const first = await reconcile(db, executor, locks, new Set());
+    const first = await reconcile(db, executor, locks, {
+      priorSuspects: new Set(),
+    });
     expect(first).toEqual({ ...NONE, suspects: ['half-created'] });
     expect(await executor.listDisks()).toContain('half-created');
 
-    const second = await reconcile(
-      db,
-      executor,
-      locks,
-      new Set(first.suspects),
-    );
+    const second = await reconcile(db, executor, locks, {
+      priorSuspects: new Set(first.suspects),
+    });
     expect(second).toEqual({ ...NONE, removedDisks: 1 });
     expect(await executor.listDisks()).not.toContain('half-created');
   });
@@ -491,18 +501,17 @@ describe('disk reconcile', () => {
     // An acquire possibly still in flight: container and disk, no row yet.
     await executor.create('maybe-in-flight');
 
-    const first = await reconcile(db, executor, locks, new Set());
+    const first = await reconcile(db, executor, locks, {
+      priorSuspects: new Set(),
+    });
     // Suspected once, as a container — not doubly as its disk.
     expect(first.suspects).toEqual(['maybe-in-flight']);
     expect(await executor.listDisks()).toContain('maybe-in-flight');
 
     // Second strike: destroy takes container and disk down together.
-    const second = await reconcile(
-      db,
-      executor,
-      locks,
-      new Set(first.suspects),
-    );
+    const second = await reconcile(db, executor, locks, {
+      priorSuspects: new Set(first.suspects),
+    });
     expect(second).toEqual({ ...NONE, destroyedOrphans: 1 });
     expect(await executor.listDisks()).not.toContain('maybe-in-flight');
   });

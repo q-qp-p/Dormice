@@ -121,13 +121,19 @@ export function fileTests(ctx: ContractContext) {
         await ctx.executor.writeFiles(id, [
           { path: '/home/user/keep.txt', content: Buffer.from('still here') },
         ]);
+        // stop() takes the shell; the start after it builds a new one
+        // around the same disk.
         await ctx.executor.freeze(id);
         await ctx.executor.stop(id);
-        // The container object itself is lost (a prune) — the disk, which
+        await ctx.executor.start(id);
+        let read = await ctx.executor.readFile(id, '/home/user/keep.txt');
+        expect(read.toString('utf8')).toBe('still here');
+        // A death's exited shell is lost too (a prune) — the disk, which
         // holds the files, is the sandbox's actual body.
+        await ctx.subject.crashContainer(id);
         await ctx.subject.vanishContainer(id);
         await ctx.executor.start(id);
-        const read = await ctx.executor.readFile(id, '/home/user/keep.txt');
+        read = await ctx.executor.readFile(id, '/home/user/keep.txt');
         expect(read.toString('utf8')).toBe('still here');
       },
       timeoutMs,

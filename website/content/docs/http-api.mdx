@@ -40,6 +40,17 @@ Two rules cover the whole surface:
 - **Every non-2xx body is `{ "message": "..." }`** — one error shape,
   whoever produced the error. 4xx name your mistake; 5xx are ours.
 
+`GET /healthz` answers `{ "status": "ok" }` whenever the process
+serves. The gateway adds its `build`; a node adds `lifecycle`, how its
+two lifecycle loops are doing — for `cooling` (the idle scanner) and
+`reconcile` (the reconciler) each: `lastSuccessAt`, `runningSince` (the
+pass in flight), `failures` (passes failed in a row), `failingSince`,
+`lastError`, and `sandboxFailures` (sandboxes whose move or repair
+failed in the last completed pass). A node's check-in carries the same
+object, so `listNodes` shows it for every node. The status never turns
+on the loops — a probe must not restart a daemon whose reconciliation
+is merely slow; watch `failures` instead.
+
 The [E2B compatibility surface](/docs/e2b-sdks) is a separate wire under
 `/e2b/*` with its own authentication — nothing below applies to it.
 

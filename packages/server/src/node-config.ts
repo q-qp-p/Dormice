@@ -24,7 +24,7 @@ export interface ConfigApplierDeps {
     warn(obj: unknown, msg: string): void;
     error(obj: unknown, msg: string): void;
   };
-  /** The heartbeat watchdog's ear, for the pids sweep. */
+  /** The boot watchdog's ear, for the pids sweep (main.ts). */
   beat?: () => void;
 }
 

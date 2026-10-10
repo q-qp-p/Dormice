@@ -1490,13 +1490,16 @@ fi
 
 # ---- verification: the install has not succeeded until doctor says so --------
 log 'verification'
-# 120s, not the 10s this probe once was: startup does migrations, the
-# startup guard, and a fleet-sized reconciliation before it listens, so a
-# busy production ledger takes well past 10s (2026-07-31, ~21s measured on
-# a live fleet — the 10s probe declared a SUCCEEDED upgrade failed, and a
-# false "failed" verdict is the one thing this step must never produce).
+# 15 minutes, not the 10s this probe once was: before it listens, the
+# daemon reads Docker's full container list once, and that list is allowed
+# 10 minutes (LIST_DEADLINE_SECONDS) — its cost grows with the containers
+# on the host: 88s for 2,600 on a busy production host (2026-10-09), where
+# the 120s this probe allowed until then was all but used up. A probe
+# shorter than the boot's own bounds declares a SUCCEEDED upgrade failed
+# (2026-07-31: the 10s probe did, ~21s measured on a live fleet), and a
+# false "failed" verdict is the one thing this step must never produce.
 # Breaking on the first answer keeps the fresh-install case as fast as ever.
-for _ in $(seq 1 240); do
+for _ in $(seq 1 1800); do
   curl -fsS "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1 && break
   sleep 0.5
 done

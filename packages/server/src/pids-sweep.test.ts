@@ -62,9 +62,11 @@ describe('sweepPidsLimit', () => {
     });
     expect(executor.pidsLimitOf(busy.id)).toBe(4096);
     expect(executor.stateOf(busy.id)).toBe('running');
-    // Not considered, not touched — the wake is where these converge.
+    // Not considered, not touched — the wake is where these converge. A
+    // stopped sandbox has no shell at all (stop() took it): its next start
+    // is a birth, under the cap in force.
     expect(executor.pidsLimitOf(frozen.id)).toBe(512);
-    expect(executor.pidsLimitOf(stopped.id)).toBe(512);
+    expect(executor.pidsLimitOf(stopped.id)).toBeNull();
     await executor.unfreeze(frozen.id);
     expect(executor.pidsLimitOf(frozen.id)).toBe(4096);
     await executor.start(stopped.id);

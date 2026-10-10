@@ -34,10 +34,20 @@ function sleep(seconds: number) {
 }
 
 describe('native API over a real daemon', () => {
-  it('answers /healthz without a token', async () => {
+  it('answers /healthz without a token, with the health of both lifecycle loops', async () => {
     const res = await fetch(`${inject('dormiceEndpoint')}/healthz`);
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ status: 'ok' });
+    // Each loop's run of failed passes is counted where an operator looks
+    // (heartbeat.ts); a healthy exam daemon has none.
+    const loop = expect.objectContaining({
+      failures: 0,
+      failingSince: null,
+      lastError: null,
+    });
+    expect(await res.json()).toEqual({
+      status: 'ok',
+      lifecycle: { cooling: loop, reconcile: loop },
+    });
   });
 
   it('rejects a wrong token with 401', async () => {

@@ -27,6 +27,7 @@ import {
   deadline,
   EXEC_END_SILENCE_SECONDS,
   EXIT_SETTLE_SECONDS,
+  LIST_DEADLINE_SECONDS,
   QUERY_DEADLINE_SECONDS,
   VERB_DEADLINE_SECONDS,
   WAIT_DEADLINE_SECONDS,
@@ -485,33 +486,36 @@ export class DockerExecutor implements Executor {
   }
 
   async stop(sandboxId: string): Promise<void> {
-    const { id: containerId } = await this.expectState(sandboxId, 'paused');
-    const container = this.docker.getContainer(containerId);
-    // Unpause first: a signal cannot be delivered into a paused gVisor
-    // sandbox — its guest kernel is stopped along with everything else
-    // (measured 2026-07-09; dockerd itself burns a hard-coded 10s wait on
-    // exactly this before escalating).
-    await deadline(
-      container.unpause(),
-      VERB_DEADLINE_SECONDS,
-      `unpause of ${sandboxId}`,
-    );
+    const found = await this.expectState(sandboxId, 'paused');
     // SIGKILL, no grace period: the sandbox has nothing to shut down
     // cleanly (crash-only — code must survive the container vanishing
     // anyway), and the disk's consistency is the ext4 journal's job.
-    await deadline(
-      container.kill(),
-      VERB_DEADLINE_SECONDS,
-      `kill of ${sandboxId}`,
-    );
-    // kill only delivers the signal; Docker marks the container exited a
-    // beat later. Wait for that, so the caller observes 'stopped' the
-    // moment stop() resolves — the same synchronous promise the fake makes.
-    await deadline(
-      container.wait({ condition: 'not-running' }),
-      WAIT_DEADLINE_SECONDS,
-      `wait(not-running) of ${sandboxId}`,
-    );
+    await this.killContainer(found);
+    // The shell goes with its processes: a stopped sandbox is its disk
+    // alone, and its next start builds a fresh shell around it. A kept
+    // exited shell saved that start one create and nothing else — gVisor's
+    // container layer does not survive a start anyway (measured 2026-09-30:
+    // /tmp and /opt come back empty) — while dockerd resolves an image for
+    // every container it lists: 1,900 exited shells were most of the 2,600
+    // containers whose list took 88s on Beijing production (2026-10-09).
+    // Best effort: the stop has happened once the processes are dead. A
+    // removal refused or answered late leaves an exited shell under a
+    // stopped row, which the reconciler's next pass removes; failing the
+    // stop over it would leave the row frozen over a dead shell, recorded
+    // later as a death the daemon did not order.
+    try {
+      await deadline(
+        this.docker.getContainer(found.id).remove({ force: true }),
+        VERB_DEADLINE_SECONDS,
+        `remove of ${sandboxId}`,
+      );
+    } catch (err) {
+      this.log(
+        `stopped ${sandboxId}; its exited shell stays until the reconciler removes it — ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
   }
 
   async start(sandboxId: string, opts?: ShellOptions): Promise<void> {
@@ -646,6 +650,26 @@ export class DockerExecutor implements Executor {
     id: string;
     status: string;
   }): Promise<void> {
+    await this.killContainer(found);
+    await deadline(
+      this.docker.getContainer(found.id).remove({ force: true }),
+      VERB_DEADLINE_SECONDS,
+      `remove of ${found.id}`,
+    );
+  }
+
+  /**
+   * takeContainerDown's first half, stop()'s whole: unpause a paused
+   * container (a signal cannot be delivered into a paused gVisor sandbox —
+   * its guest kernel is stopped along with everything else), SIGKILL it,
+   * and wait for the exit Docker records a beat later, so the caller
+   * observes the processes dead the moment this resolves. A container
+   * already exited is left as it is.
+   */
+  private async killContainer(found: {
+    id: string;
+    status: string;
+  }): Promise<void> {
     const container = this.docker.getContainer(found.id);
     if (found.status === 'paused') {
       await deadline(
@@ -671,22 +695,30 @@ export class DockerExecutor implements Executor {
         `wait(not-running) of ${found.id}`,
       );
     }
-    await deadline(
-      container.remove({ force: true }),
-      VERB_DEADLINE_SECONDS,
-      `remove of ${found.id}`,
-    );
   }
 
   async listContainers(): Promise<Map<string, ContainerState>> {
-    const containers = await deadline(
-      this.docker.listContainers({
-        all: true,
-        filters: { label: [SANDBOX_LABEL] },
-      }),
-      QUERY_DEADLINE_SECONDS,
-      'listContainers',
-    );
+    // A list given up on is aborted, not abandoned: the request's socket
+    // closes, dockerd cancels the request's context, and the image lookups
+    // still queued for it fail fast instead of running on for a caller who
+    // left — with a deadline shorter than the list, each heartbeat used to
+    // start a new list on top of the ones still running.
+    const abort = new AbortController();
+    let containers: Docker.ContainerInfo[];
+    try {
+      containers = await deadline(
+        this.docker.listContainers({
+          all: true,
+          filters: { label: [SANDBOX_LABEL] },
+          abortSignal: abort.signal,
+        }),
+        LIST_DEADLINE_SECONDS,
+        'listContainers',
+      );
+    } catch (err) {
+      abort.abort();
+      throw err;
+    }
     const observed = new Map<string, ContainerState>();
     for (const c of containers) {
       const sandboxId = c.Labels[SANDBOX_LABEL];
@@ -695,6 +727,11 @@ export class DockerExecutor implements Executor {
       }
     }
     return observed;
+  }
+
+  async containerState(sandboxId: string): Promise<ContainerState | null> {
+    const found = await this.inspect(sandboxId);
+    return found === null ? null : containerStateFromDocker(found.status);
   }
 
   async listDisks(): Promise<string[]> {

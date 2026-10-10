@@ -2,6 +2,7 @@ import {
   type BuildInfo,
   type CheckInRequest,
   checkInResponseSchema,
+  type LifecycleHealth,
   type NodeConfigBundle,
   type NodeReading,
   type SelfUpgrade,
@@ -27,6 +28,8 @@ export async function readNodeReading(
   dataDir: string,
   executor: Executor,
   swap?: SwapControl,
+  /** The two lifecycle loops' health (heartbeat.ts), so failing passes show in listNodes; the daemon always passes it. */
+  lifecycle?: LifecycleHealth,
 ): Promise<NodeReading> {
   const { byState, total } = countSandboxesByState(db);
   return {
@@ -35,6 +38,7 @@ export async function readNodeReading(
     sandboxDisks: await executor.diskUsage(),
     managedSwap:
       swap === undefined ? null : { activeGb: (await swap.status()).activeGb },
+    ...(lifecycle === undefined ? {} : { lifecycle }),
   };
 }
 
@@ -261,14 +265,14 @@ export class CheckIn {
    * check-ins sent here carry `configVersion: null`, which is what keeps
    * the gateway from placing on this node before it listens.
    *
-   * `beat` is the heartbeat watchdog's ear, and this wait is the only
+   * `beat` is the boot watchdog's ear (main.ts), and this wait is the only
    * place the check-in may beat it: each attempt — answered or not,
    * bounded by CHECK_IN_TIMEOUT_MS — is the wait provably alive, where
    * the watchdog, started before boot's awaits, otherwise read a node
    * half an hour into waiting for its gateway as a stalled daemon and
    * exited it — every thirty minutes, for nothing (found by review,
    * 2026-09-14). The ticker (start()) is handed no beat, so a ticker's
-   * liveness cannot reassure the watchdog (main.ts has the 2026-08-13
+   * liveness cannot reassure a watchdog (watchdog.ts has the 2026-08-13
    * lesson); the lifecycle work a bundle sets off (the pids sweep in
    * applyConfig) beats per row on its own, as work does everywhere.
    */

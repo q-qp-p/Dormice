@@ -19,10 +19,16 @@ core job is keeping the two in agreement.**
 - Reality moves first, then the ledger records it. A crash between the
   two leaves a container without a record — never a record without a
   container — and the reconciler cleans that up.
-- A **reconciler** runs before the daemon starts listening and again on
-  every heartbeat: a container that died behind the daemon's back is
+- A **reconciler** runs before the daemon starts listening and then as
+  a loop of its own: a container that died behind the daemon's back is
   recorded as stopped (its disk, and therefore its data, kept), and
-  ownerless leftovers are swept.
+  ownerless leftovers are swept. It reads Docker's full container list,
+  the one Docker read whose cost grows with the number of containers —
+  so the idle scanner that freezes and stops sandboxes is a separate
+  loop that never waits on it: a slow or failing list delays repairs,
+  never freezing. Each loop's health — when a pass last completed,
+  failed passes in a row, the last error — is in the daemon's
+  `/healthz` and in [`listNodes`](/docs/http-api#the-verbs).
 - The design is **crash-only**: you can kill the daemon at any moment;
   it reconciles on the way up. Its own shutdown is therefore short by
   design — on SIGTERM it ends every attached stream with an honest
@@ -85,7 +91,7 @@ template's image, and stack as many layers as you need.
 **The container writable layer** is scratch space: `/tmp`, packages
 installed outside the home directory, running processes. The container
 is replaceable machinery, and this layer goes wherever it goes — a
-rebuild, a prune, an out-of-memory kill.
+stop, a rebuild, a prune, an out-of-memory kill.
 
 **The disk at `/home/user`** is the sandbox's body: a dedicated disk
 image with a physical quota, and the only layer that persists. See

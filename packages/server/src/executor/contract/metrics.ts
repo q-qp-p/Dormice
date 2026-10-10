@@ -79,9 +79,14 @@ export function metricsTests(ctx: ContractContext) {
     it(
       'metrics refuses a stopped or absent sandbox',
       async () => {
+        const exited = await ctx.freshExited();
+        await expect(ctx.executor.metrics(exited)).rejects.toThrow(
+          `container ${exited} is stopped, expected running or paused`,
+        );
+        // Stopped by the daemon: the disk alone, no container to measure.
         const stopped = await ctx.freshStopped();
         await expect(ctx.executor.metrics(stopped)).rejects.toThrow(
-          `container ${stopped} is stopped, expected running or paused`,
+          `container ${stopped} is absent, expected running or paused`,
         );
         const ghost = randomUUID();
         await expect(ctx.executor.metrics(ghost)).rejects.toThrow(
@@ -155,10 +160,11 @@ export function metricsTests(ctx: ContractContext) {
     it(
       'a stopped sandbox and a vanished container still count — the disk is the body',
       async () => {
-        const id = await ctx.freshStopped();
+        await ctx.freshStopped();
         expect((await ctx.executor.diskUsage()).count).toBe(1);
-        await ctx.subject.vanishContainer(id);
-        expect((await ctx.executor.diskUsage()).count).toBe(1);
+        const pruned = await ctx.freshExited();
+        await ctx.subject.vanishContainer(pruned);
+        expect((await ctx.executor.diskUsage()).count).toBe(2);
       },
       timeoutMs,
     );

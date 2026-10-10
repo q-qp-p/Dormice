@@ -7,8 +7,8 @@ export interface ArchiveStore {
   /**
    * Uploads the file at filePath under key, overwriting — retries are safe.
    * onPulse fires as bytes actually land (per delivered part) — no fraction,
-   * because nothing surfaces upload percent; the caller is the heartbeat
-   * watchdog, which only asks "is this still moving?". A dead connection
+   * because nothing surfaces upload percent; the caller is the cooling
+   * loop's watchdog, which only asks "is this still moving?". A dead connection
    * stops pulsing, which is exactly what it should hear.
    */
   put(key: string, filePath: string, onPulse?: () => void): Promise<void>;

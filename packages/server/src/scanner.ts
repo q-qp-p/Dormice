@@ -93,7 +93,7 @@ function dueTransition(
  * Two phases, fast then slow: an archive is minutes of tar and upload, and
  * a batch of same-aged sandboxes crossing the archive line together would
  * otherwise stall every freeze, stop and deadline-kill behind them for the
- * whole heartbeat tick. Every cheap move lands first; archives then run
+ * whole pass. Every cheap move lands first; archives then run
  * serially (one disk's worth of I/O at a time — the host has one disk),
  * each re-verified inside its own slot. With no archiver — or archiving
  * switched off in the ledger settings — the archive rung
@@ -115,8 +115,8 @@ export async function scanOnce(
   watchers?: WatcherTable,
   /**
    * Called once per row considered — and by a running archive as bytes
-   * actually move — the heartbeat watchdog's evidence that a long sweep
-   * is progressing rather than stuck on one await.
+   * actually move — the cooling loop's watchdog's evidence (heartbeat.ts)
+   * that a long sweep is progressing rather than stuck on one await.
    */
   onProgress?: () => void,
 ): Promise<ScanResult> {

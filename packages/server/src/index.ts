@@ -15,7 +15,11 @@ export type { ContainerState, Executor } from './executor/executor';
 export { FakeExecutor } from './executor/fake';
 export { KeyedQueue, SKIPPED } from './keyed-queue';
 export { type SampleResult, sampleOnce } from './metrics-sampler';
-export { type ReconcileResult, reconcile } from './reconciler';
+export {
+  type ReconcileOptions,
+  type ReconcileResult,
+  reconcile,
+} from './reconciler';
 export { type ScanResult, scanOnce } from './scanner';
 // Test scaffolding for the suites that embed the daemon (sdk, cli): a
 // configuration bundle applied the way a check-in would — the daemon reads

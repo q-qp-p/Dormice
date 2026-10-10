@@ -50,7 +50,34 @@ container is a disposable shell. The daemon records the pruned sandboxes
 as stopped, and the next `acquireSandbox` rebuilds a container from the
 surviving disk — same sandbox ID, `/home/user` intact. Verified
 end-to-end on real hardware.
-([Sandbox persistence](/docs/persistence) is the full contract.)
+([Sandbox persistence](/docs/persistence) is the full contract.) A
+stopped sandbox keeps no container anyway — the stop removes it — so a
+prune only finds the shells of sandboxes that died on their own.
+
+## The log says `reconcile pass failed`
+
+**Symptom:** the daemon's log (`journalctl -u dormice`) repeats
+`reconcile pass failed`, typically with
+`listContainers got no answer from dockerd within 600s`, and
+`lifecycle.reconcile.failures` in its `/healthz` keeps climbing.
+
+Reconciliation reads Docker's full list of sandbox containers, and the
+list's cost grows with the number of containers: Docker resolves the
+image of every container it lists — with the containerd image store,
+about ten uncached round trips each. A busy production host took 88 s
+for 2,600 containers. While the list fails, a sandbox that died behind
+the daemon's back is noticed when it is next used rather than within a
+pass; freezing, stopping and archiving go on as usual — they run as a
+loop of their own and need no list.
+
+Count the containers: `docker ps -aq --filter label=dormice.sandbox | wc -l`.
+It should be about your active plus frozen sandboxes: a stop removes
+its container, and the exited shell a sandbox leaves when it dies on its
+own is removed by a reconcile pass once the death is on record. A daemon upgraded from a
+build before 2026-10-10 starts with every stopped sandbox's exited shell
+still in place; its first passes remove them one at a time while
+everything else goes on. If the list stays slow with few containers,
+look at dockerd itself (`top`, `journalctl -u docker`).
 
 ## Long commands die at exactly 5 minutes
 

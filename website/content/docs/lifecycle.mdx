@@ -22,9 +22,11 @@ active ── idle ──▶ frozen ── idle ──▶ stopped ── idle �
   an idle sandbox holding 1 GiB drops to about 5 MiB of actual RAM, and
   wakes in about 50 ms with all its processes still running, exactly
   where they were.
-- **stopped** — the container is shut down; only the disk remains.
-  Waking is a cold start from the surviving disk — seconds rather than
-  milliseconds. Processes do not survive this step; files do.
+- **stopped** — the container is shut down and removed; only the disk
+  remains. Waking is a cold start in a fresh container around the
+  surviving disk — seconds rather than milliseconds. Processes do not
+  survive this step, and neither does anything outside `/home/user`;
+  files under it do.
 - **archived** — the disk is compressed and shipped to rented internet
   storage (an [S3-compatible
   bucket](/docs/core-concepts#object-storage-s3)); nothing remains on
@@ -73,7 +75,8 @@ freeze ≤ stop ≤ archive.
 
 A background scanner checks every `DORMICE_SCAN_INTERVAL_SECONDS`
 (default 60) and moves each idle sandbox down at most one state per
-sweep.
+sweep. It reads only the daemon's own records and the containers it
+moves, so it keeps its pace however slowly Docker lists containers.
 
 ## Change the policy later
 

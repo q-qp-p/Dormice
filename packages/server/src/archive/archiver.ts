@@ -58,7 +58,7 @@ function clampPercent(fraction: number): number {
  * Pulses onPulse while the file at filePath keeps growing — sampled, not
  * evented, because the writer (tar) offers no progress hooks and a growing
  * output file IS its progress. Only actual growth pulses: a wedged writer
- * goes silent, and the heartbeat watchdog hears exactly that. A file not
+ * goes silent, and the cooling loop's watchdog hears exactly that. A file not
  * born yet is no growth either. stop() ends the sampling for good: a stat
  * already in flight when it is called delivers nothing — clearing the
  * interval alone let that last sample pulse after stop() whenever the
@@ -180,8 +180,8 @@ export class Archiver {
    * object, and "local copy freed" includes the shell (the next restore
    * then rebuilds from the template's current image).
    *
-   * onPulse is the heartbeat watchdog's ear: the scanner awaits this whole
-   * transfer inside a heartbeat tick, and one big disk over a slow uplink
+   * onPulse is the cooling loop's watchdog's ear: the scanner awaits this
+   * whole transfer inside a cooling pass, and one big disk over a slow uplink
    * can legitimately outlast the watchdog's stall limit. Pulses carry real
    * progress only — tar's output growing, upload parts landing — so a
    * genuinely stuck transfer still goes silent and gets bitten.

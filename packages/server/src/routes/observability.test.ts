@@ -439,7 +439,7 @@ describe('listSandboxImages', () => {
     ]);
   });
 
-  it('answers every row: a stopped shell keeps its old image, honestly upgradable', async () => {
+  it('answers every row: a stopped sandbox has no shell, so nothing to upgrade — its wake boots the current image', async () => {
     const { app, db, executor } = testApp();
     registerTestTemplate(db, 'py', 'img-v1');
     const created = (
@@ -449,13 +449,33 @@ describe('listSandboxImages', () => {
     await stopSandbox(db, executor, created.id);
     registerTestTemplate(db, 'py', 'img-v2');
 
-    // The exited container is still the shell: waking it would boot the old
-    // image, so the row is honestly reported as upgradable.
+    // stop() took the shell: the disk alone remains, and its next boot
+    // resolves the template's current image by itself.
     expect(await images(app)).toMatchObject([
-      { image: 'img-v1', nextImage: 'img-v2', upgradable: true },
+      { image: null, nextImage: 'img-v2', upgradable: false },
     ]);
     // Observation is not activity: still stopped afterwards.
     const { sandboxes } = (await rpc(app, '/listSandboxes')).json();
     expect(sandboxes[0].state).toBe('stopped');
+  });
+
+  it('a shell that died on its own keeps its old image, honestly upgradable until the reconciler removes it', async () => {
+    const { app, db, executor } = testApp();
+    registerTestTemplate(db, 'py', 'img-v1');
+    const created = (
+      await rpc(app, '/acquireSandbox', { name: 'dead', template: 'py' })
+    ).json().sandbox;
+    executor.crashContainer(created.id, {
+      exitCode: 137,
+      oomKilled: true,
+      runtimeDied: false,
+    });
+    registerTestTemplate(db, 'py', 'img-v2');
+
+    // The exited container is still the shell: a start would boot the old
+    // image, so the row is honestly reported as upgradable.
+    expect(await images(app)).toMatchObject([
+      { image: 'img-v1', nextImage: 'img-v2', upgradable: true },
+    ]);
   });
 });

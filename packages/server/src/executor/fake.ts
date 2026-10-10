@@ -297,10 +297,11 @@ export class FakeExecutor implements Executor {
    */
   private readonly limits = new Map<string, ShellLimits>();
   /**
-   * How each stopped shell's processes ended — the docker executor's
-   * State.ExitCode/OOMKilled. Written by stop() (a SIGKILL: 137, not an
-   * OOM) and the crashContainer hook; gone when the shell runs again or
-   * goes, so a live shell never reports a stale death.
+   * How each exited shell's processes ended — the docker executor's
+   * State.ExitCode/OOMKilled. Written by the crashContainer hook alone: a
+   * death the daemon did not order is the one way an exited shell exists,
+   * stop() removing its own. Gone when the shell runs again or goes, so a
+   * live shell never reports a stale death.
    */
   private readonly exits = new Map<string, ShellExit>();
   /**
@@ -469,24 +470,23 @@ export class FakeExecutor implements Executor {
 
   async stop(sandboxId: string): Promise<void> {
     this.expect(sandboxId, 'paused');
-    this.containers.set(sandboxId, 'stopped');
-    // What the real stop leaves behind: SIGKILL's 137, no OOM verdict, and
-    // a runtime that was killed rather than one that died.
-    this.exits.set(sandboxId, {
-      exitCode: 137,
-      oomKilled: false,
-      runtimeDied: false,
-      finishedAt: new Date().toISOString(),
-    });
+    // What the real stop leaves behind: the disk alone — the shell goes
+    // with its processes (docker.ts stop has why).
+    this.containers.delete(sandboxId);
+    this.images.delete(sandboxId);
+    this.limits.delete(sandboxId);
+    this.exits.delete(sandboxId);
+    this.pids.delete(sandboxId);
     this.killProcesses(sandboxId);
   }
 
   async start(sandboxId: string, opts?: ShellOptions): Promise<void> {
     const actual = this.containers.get(sandboxId);
     if (actual === undefined) {
-      // The container object is gone (pruned, removed behind the daemon's
-      // back) but the disk survives — and the disk is the sandbox's data,
-      // the container just a replaceable shell. Rebuild around the disk.
+      // No container object — stop() removed it, or something behind the
+      // daemon's back did — but the disk survives, and the disk is the
+      // sandbox's data, the container just a replaceable shell. Build one
+      // around the disk.
       if (!this.disks.has(sandboxId)) {
         throw new Error(`disk ${sandboxId} is absent, cannot start`);
       }
@@ -550,6 +550,10 @@ export class FakeExecutor implements Executor {
   async listContainers(): Promise<Map<string, ContainerState>> {
     // A copy: reality is observed, not handed out by reference.
     return new Map(this.containers);
+  }
+
+  async containerState(sandboxId: string): Promise<ContainerState | null> {
+    return this.containers.get(sandboxId) ?? null;
   }
 
   async listDisks(): Promise<string[]> {

@@ -341,7 +341,9 @@ describe('acquire wakes cold sandboxes', () => {
     const lastActiveAt = created.sandbox.lastActiveAt;
     await scanOnce(db, executor, locks, after(lastActiveAt, 60));
     await scanOnce(db, executor, locks, after(lastActiveAt, 120));
-    expect(executor.stateOf(id)).toBe('stopped');
+    // Stopped is the disk alone: the shell went with its processes.
+    expect(executor.stateOf(id)).toBeUndefined();
+    expect(await executor.listDisks()).toContain(id);
 
     const woken = (await acquire(app, { name: 'alice' })).json();
     expect(woken.sandbox.id).toBe(id);
@@ -444,7 +446,7 @@ describe('acquire after reality moved behind the ledger', () => {
 
     // The heartbeat reconciles before every scan; the dead row is deleted
     // within one interval, freeing the key.
-    await reconcile(db, executor, locks, new Set());
+    await reconcile(db, executor, locks, { priorSuspects: new Set() });
 
     const again = (await acquire(app, { name: 'alice' })).json();
     expect(again.status).toBe('ready');
@@ -456,25 +458,22 @@ describe('acquire after reality moved behind the ledger', () => {
   });
 
   it('returns the same sandbox after its exited container was pruned', async () => {
-    // A stopped sandbox is an exited container plus a disk, and a routine
+    // A death leaves an exited container beside the disk, and a routine
     // `docker container prune` eats the container object. The disk — the
     // sandbox's actual data — survives, so the sandbox must survive too:
     // same name, same id, rebuilt from the disk. Never a silent fresh
     // empty box.
     const { app, db, executor, locks } = testApp();
-    const created = (
-      await acquire(app, {
-        name: 'alice',
-        policy: { freezeAfterSeconds: 60, stopAfterSeconds: 120 },
-      })
-    ).json();
+    const created = (await acquire(app, { name: 'alice' })).json();
     const id = created.sandbox.id;
-    const lastActiveAt = created.sandbox.lastActiveAt;
-    await scanOnce(db, executor, locks, after(lastActiveAt, 60));
-    await scanOnce(db, executor, locks, after(lastActiveAt, 120));
+    executor.crashContainer(id, {
+      exitCode: 137,
+      oomKilled: true,
+      runtimeDied: false,
+    });
     executor.vanishContainer(id);
 
-    await reconcile(db, executor, locks, new Set());
+    await reconcile(db, executor, locks, { priorSuspects: new Set() });
 
     const again = (await acquire(app, { name: 'alice' })).json();
     expect(again.sandbox.id).toBe(id);
@@ -544,7 +543,7 @@ describe('acquire finds the shell dead under an active row', () => {
     const t = revived.sandbox.lastActiveAt;
     await scanOnce(db, executor, locks, after(t, 60));
     await scanOnce(db, executor, locks, after(t, 120));
-    expect(executor.stateOf(id)).toBe('stopped');
+    expect(executor.stateOf(id)).toBeUndefined();
     const listed = (await rpc(app, '/listSandboxes'))
       .json()
       .sandboxes.find((s: { id: string }) => s.id === id);
@@ -1744,20 +1743,23 @@ describe('cold wakes converge onto the current image', () => {
     expect(executor.removedShells).toEqual([]);
   });
 
-  it('stopped + stale: the same convergence — stop kept the old shell, the wake replaces it', async () => {
+  it('stopped + stale: the same convergence — a death kept the old shell, the wake replaces it', async () => {
     const { app, db, executor, locks } = testApp(new FakeExecutor(), {
       templates: [{ name: 'py', image: 'img-v1' }],
     });
     const created = (
-      await acquire(app, {
-        name: 'alice',
-        template: 'py',
-        policy: { freezeAfterSeconds: 60, stopAfterSeconds: 120 },
-      })
+      await acquire(app, { name: 'alice', template: 'py' })
     ).json().sandbox;
-    await scanOnce(db, executor, locks, after(created.lastActiveAt, 60));
-    await scanOnce(db, executor, locks, after(created.lastActiveAt, 120));
-    // The stopped container object survives, still born from the old image.
+    // A death leaves its exited shell under the row the startup pass
+    // records as stopped — still born from the old image. (An ordered
+    // stop leaves no shell at all; a runtime pass removes this one.)
+    executor.crashContainer(created.id, {
+      exitCode: 137,
+      oomKilled: true,
+      runtimeDied: false,
+    });
+    await reconcile(db, executor, locks);
+    expect(findById(db, created.id)?.state).toBe('stopped');
     expect(executor.stateOf(created.id)).toBe('stopped');
     expect(await executor.imageOf(created.id)).toBe('img-v1');
 
@@ -1786,14 +1788,16 @@ describe('cold wakes converge onto the current image', () => {
 
   it('stopped + born before the container-layer cap: the wake swaps it onto a capped shell', async () => {
     const { app, db, executor, locks } = testApp();
-    const created = (
-      await acquire(app, {
-        name: 'alice',
-        policy: { freezeAfterSeconds: 60, stopAfterSeconds: 120 },
-      })
-    ).json().sandbox;
-    await scanOnce(db, executor, locks, after(created.lastActiveAt, 60));
-    await scanOnce(db, executor, locks, after(created.lastActiveAt, 120));
+    const created = (await acquire(app, { name: 'alice' })).json().sandbox;
+    // An exited shell under a stopped row, born by a build before the cap
+    // — the shape every pre-upgrade stopped sandbox has until the first
+    // runtime pass removes its shell.
+    executor.crashContainer(created.id, {
+      exitCode: 137,
+      oomKilled: false,
+      runtimeDied: false,
+    });
+    await reconcile(db, executor, locks);
     expect(executor.stateOf(created.id)).toBe('stopped');
     executor.plantUncappedShell(created.id);
 
@@ -1822,7 +1826,7 @@ describe('cold wakes converge onto the current image', () => {
     expect(executor.removedShells).toEqual([]);
   });
 
-  it('a vanished shell is not judged stale — the start builds from the current image by itself', async () => {
+  it('a stopped sandbox has no shell to judge stale — the start builds from the current image by itself', async () => {
     const { app, db, executor, locks } = testApp(new FakeExecutor(), {
       templates: [{ name: 'py', image: 'img-v1' }],
     });
@@ -1835,13 +1839,14 @@ describe('cold wakes converge onto the current image', () => {
     ).json().sandbox;
     await scanOnce(db, executor, locks, after(created.lastActiveAt, 60));
     await scanOnce(db, executor, locks, after(created.lastActiveAt, 120));
-    executor.vanishContainer(created.id);
+    // stop() took the shell.
+    expect(await executor.imageOf(created.id)).toBeNull();
 
     registerTestTemplate(db, 'py', 'img-v2');
     const woken = (await acquire(app, { name: 'alice' })).json().sandbox;
     expect(woken.state).toBe('active');
-    // Converged all the same, but through start's own rebuild — no shell
-    // was removed, so no 'rebuilt' entry claims one was.
+    // Converged all the same, but through start's own build — no shell
+    // was removed at the wake, so no swap claims one was.
     expect(await executor.imageOf(created.id)).toBe('img-v2');
     expect(executor.removedShells).toEqual([]);
   });

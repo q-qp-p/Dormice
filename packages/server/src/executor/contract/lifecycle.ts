@@ -18,9 +18,28 @@ export function lifecycleTests(ctx: ContractContext) {
         expect(await ctx.stateOf(id)).toBe('running');
         await ctx.executor.freeze(id);
         await ctx.executor.stop(id);
-        expect(await ctx.stateOf(id)).toBe('stopped');
+        // A stopped sandbox is its disk alone: stop() removes the shell,
+        // so no exited container is left for every list to carry.
+        expect(await ctx.stateOf(id)).toBeUndefined();
+        expect(await ctx.executor.listDisks()).toContain(id);
         await ctx.executor.start(id);
         expect(await ctx.stateOf(id)).toBe('running');
+      },
+      timeoutMs,
+    );
+
+    it(
+      'containerState reads one container as it is now, and null without one',
+      async () => {
+        const id = await ctx.fresh();
+        expect(await ctx.executor.containerState(id)).toBe('running');
+        await ctx.executor.freeze(id);
+        expect(await ctx.executor.containerState(id)).toBe('paused');
+        await ctx.executor.stop(id);
+        expect(await ctx.executor.containerState(id)).toBeNull();
+        const exited = await ctx.freshExited();
+        expect(await ctx.executor.containerState(exited)).toBe('stopped');
+        expect(await ctx.executor.containerState(randomUUID())).toBeNull();
       },
       timeoutMs,
     );
@@ -71,11 +90,15 @@ export function lifecycleTests(ctx: ContractContext) {
         await ctx.executor.destroy(paused);
         expect(await ctx.stateOf(paused)).toBeUndefined();
 
-        const stopped = await ctx.fresh();
-        await ctx.executor.freeze(stopped);
-        await ctx.executor.stop(stopped);
+        // Stopped: the disk alone, and destroy takes it.
+        const stopped = await ctx.freshStopped();
         await ctx.executor.destroy(stopped);
-        expect(await ctx.stateOf(stopped)).toBeUndefined();
+        expect(await ctx.executor.listDisks()).not.toContain(stopped);
+
+        const exited = await ctx.freshExited();
+        await ctx.executor.destroy(exited);
+        expect(await ctx.stateOf(exited)).toBeUndefined();
+        expect(await ctx.executor.listDisks()).not.toContain(exited);
       },
       timeoutMs,
     );
@@ -95,10 +118,10 @@ export function lifecycleTests(ctx: ContractContext) {
     it(
       'start rebuilds the container from a surviving disk',
       async () => {
-        const id = await ctx.freshStopped();
-        // The exited container object is removed behind the daemon's back —
-        // exactly what a routine `docker container prune` does. The disk,
-        // which is the sandbox's actual data, stays.
+        const id = await ctx.freshExited();
+        // The exited container a death left is removed behind the daemon's
+        // back — exactly what a routine `docker container prune` does. The
+        // disk, which is the sandbox's actual data, stays.
         await ctx.subject.vanishContainer(id);
         expect(await ctx.stateOf(id)).toBeUndefined();
         expect(await ctx.executor.listDisks()).toContain(id);
@@ -113,7 +136,7 @@ export function lifecycleTests(ctx: ContractContext) {
     it(
       'destroy of a vanished container still takes the leftover disk',
       async () => {
-        const id = await ctx.freshStopped();
+        const id = await ctx.freshExited();
         await ctx.subject.vanishContainer(id);
 
         await ctx.executor.destroy(id);
@@ -163,10 +186,10 @@ export function lifecycleTests(ctx: ContractContext) {
         expect(await ctx.stateOf(paused)).toBeUndefined();
         expect(await ctx.executor.listDisks()).toContain(paused);
 
-        const stopped = await ctx.freshStopped();
-        await ctx.executor.removeContainer(stopped);
-        expect(await ctx.stateOf(stopped)).toBeUndefined();
-        expect(await ctx.executor.listDisks()).toContain(stopped);
+        const exited = await ctx.freshExited();
+        await ctx.executor.removeContainer(exited);
+        expect(await ctx.stateOf(exited)).toBeUndefined();
+        expect(await ctx.executor.listDisks()).toContain(exited);
       },
       timeoutMs,
     );
@@ -174,9 +197,9 @@ export function lifecycleTests(ctx: ContractContext) {
     it(
       'removeContainer: an absent container is the goal state beside a disk, a complaint without one',
       async () => {
+        // Stopped: stop() took the shell already — removing it again is a
+        // no-op, and the disk stays.
         const id = await ctx.freshStopped();
-        await ctx.subject.vanishContainer(id);
-        // Pruned behind the daemon's back — removing it again is a no-op.
         await ctx.executor.removeContainer(id);
         expect(await ctx.executor.listDisks()).toContain(id);
 
@@ -245,19 +268,24 @@ export function lifecycleTests(ctx: ContractContext) {
     );
 
     it(
-      'exitOf reads how a stopped shell ended, and nothing for a live or absent one',
+      'exitOf reads how a shell that died on its own ended, and nothing for a live, stopped or absent one',
       async () => {
         const id = await ctx.fresh();
         expect(await ctx.executor.exitOf(id)).toBeNull();
         await ctx.executor.freeze(id);
         expect(await ctx.executor.exitOf(id)).toBeNull();
-        const before = Date.now();
+        // An ordered stop removes the shell: it leaves no exit to read —
+        // the one exit the reconciler must never take for a death.
         await ctx.executor.stop(id);
-        // stop() is a SIGKILL: 137 by the shell convention, and not an OOM
-        // — the one exit the reconciler must never read as a death verdict.
-        // finishedAt is the runtime's own clock on the death, millisecond
-        // ISO like every other timestamp the ledger keeps.
-        const exit = await ctx.executor.exitOf(id);
+        expect(await ctx.executor.exitOf(id)).toBeNull();
+
+        const dead = await ctx.fresh();
+        const before = Date.now();
+        await ctx.subject.crashContainer(dead);
+        // A SIGKILL from outside: 137 by the shell convention, and not an
+        // OOM. finishedAt is the runtime's own clock on the death,
+        // millisecond ISO like every other timestamp the ledger keeps.
+        const exit = await ctx.executor.exitOf(dead);
         expect(exit).toEqual({
           exitCode: 137,
           oomKilled: false,
@@ -270,18 +298,17 @@ export function lifecycleTests(ctx: ContractContext) {
         expect(Date.parse(exit?.finishedAt ?? '')).toBeLessThanOrEqual(
           Date.now(),
         );
-        await ctx.executor.start(id);
-        expect(await ctx.executor.exitOf(id)).toBeNull();
-        await ctx.executor.freeze(id);
-        await ctx.executor.stop(id);
-        await ctx.subject.vanishContainer(id);
-        expect(await ctx.executor.exitOf(id)).toBeNull();
+        await ctx.executor.start(dead);
+        expect(await ctx.executor.exitOf(dead)).toBeNull();
+        await ctx.subject.crashContainer(dead);
+        await ctx.subject.vanishContainer(dead);
+        expect(await ctx.executor.exitOf(dead)).toBeNull();
       },
       timeoutMs,
     );
 
     it(
-      "convergePidsLimit touches a running shell only — paused, stopped and absent are the wake's business",
+      "convergePidsLimit touches a running shell only — paused, stopped, exited and absent are the wake's business",
       async () => {
         const id = await ctx.fresh();
         // Born under the configured cap: nothing to do, and said so.
@@ -290,8 +317,8 @@ export function lifecycleTests(ctx: ContractContext) {
         expect(await ctx.executor.convergePidsLimit(id)).toBe('skipped');
         await ctx.executor.stop(id);
         expect(await ctx.executor.convergePidsLimit(id)).toBe('skipped');
-        await ctx.subject.vanishContainer(id);
-        expect(await ctx.executor.convergePidsLimit(id)).toBe('skipped');
+        const exited = await ctx.freshExited();
+        expect(await ctx.executor.convergePidsLimit(exited)).toBe('skipped');
       },
       timeoutMs,
     );

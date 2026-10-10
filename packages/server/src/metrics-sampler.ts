@@ -24,7 +24,7 @@ import { type CpuSampler, readHostSample } from './host-metrics';
  * starts nothing — and a window the daemon slept through stays honestly
  * empty.
  *
- * Runs on its own chained ticker, not the heartbeat's: a heartbeat tick
+ * Runs on its own chained ticker, not a lifecycle loop's: a cooling pass
  * legitimately runs 45s+ (memory.reclaim), and sampling cadence must not
  * inherit that jitter.
  */

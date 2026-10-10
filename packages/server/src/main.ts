@@ -20,8 +20,9 @@ import {
 import { resolveBaseImage } from './db/templates';
 import { WatcherTable } from './e2b/watcher-table';
 import { DockerExecutor } from './executor/docker';
-import type { Executor } from './executor/executor';
+import type { ContainerState, Executor } from './executor/executor';
 import { FakeExecutor } from './executor/fake';
+import { Heartbeat } from './heartbeat';
 import { gib, HostDiskGrower } from './host-disk';
 import { CpuSampler } from './host-metrics';
 import { KeyedQueue } from './keyed-queue';
@@ -29,7 +30,6 @@ import { sampleOnce } from './metrics-sampler';
 import { applyConfig } from './node-config';
 import { sweepPidsLimit } from './pids-sweep';
 import { reconcile } from './reconciler';
-import { scanOnce } from './scanner';
 import { closeWithGrace, trackConnections } from './shutdown';
 import { locallyClaimedCount, startupGuard } from './startup-guard';
 import { SwapManager } from './swap';
@@ -126,32 +126,31 @@ function buildExecutor(cfg: Config, log: (msg: string) => void): Executor {
 
 const executor = buildExecutor(config, (msg) => log.info(msg));
 
-// The daemon's dead-man switch (see watchdog.ts for the 2026-08-13 incident
-// that earned it). Started here, before the boot sequence's own awaits, so
-// the startup reconcile is guarded the same as every later heartbeat tick —
-// the sweep is the same code either way. Sweeps beat once per row through
-// onProgress, and an archive transfer pulses on real bytes moving, so a
-// backlog sweep or one big slow upload runs as long as it needs, while an
-// await that silently never settles — the failure mode per-call deadlines
-// may have missed — is bitten within the stall limit. The bite is a
-// crash-only exit: systemd restarts the daemon, startup reconciliation
-// squares the ledger with reality, and the ledger already holds every row
-// the stuck sweep completed — nothing is lost. Only lifecycle work feeds
-// beat: the metrics ticker staying alive is exactly what masked the 08-13
-// death, so its liveness must never reassure this watchdog.
-const watchdog = new Watchdog({
-  stallAfterMs: 30 * 60 * 1000,
+// The boot sequence's dead-man switch (see watchdog.ts for the 2026-08-13
+// incident that earned it), started here, before the boot's own awaits:
+// the startup list, the startup reconcile, the wait for a gateway and the
+// pids sweep beat it as they progress, while an await that silently never
+// settles — the failure mode per-call deadlines may have missed — is
+// bitten within the stall limit. The bite is a crash-only exit: systemd
+// restarts the daemon, and the ledger already holds every row the stuck
+// step completed — nothing is lost. Stopped once the daemon listens: from
+// then on each lifecycle loop runs under a switch of its own
+// (heartbeat.ts), and nothing else's progress may vouch for them — the
+// metrics ticker staying alive is exactly what masked the 08-13 death.
+const STALL_AFTER_MS = 30 * 60 * 1000;
+const bootWatchdog = new Watchdog({
+  stallAfterMs: STALL_AFTER_MS,
   checkEveryMs: 60 * 1000,
   onStall: (stalledForMs) => {
     log.fatal(
       { stalledForMs },
-      'daemon made no progress within the stall limit — crash-only exit, systemd brings us back',
+      'daemon boot made no progress within the stall limit — crash-only exit, systemd brings us back',
     );
     process.exit(1);
   },
 });
-watchdog.start();
-const beat = () => watchdog.beat();
+bootWatchdog.start();
+const beat = () => bootWatchdog.beat();
 
 // One queue for the whole daemon: HTTP verbs and the heartbeat's actors
 // must share the same per-sandbox slots or the serialization means nothing.
@@ -171,6 +170,29 @@ const archiver = new Archiver({
   tmpDir: path.join(config.DORMICE_DATA_DIR, 'tmp'),
   log: (msg) => log.info(msg),
   watchers,
+});
+
+// The lifecycle work once the daemon serves: idle cooling and
+// reconciliation as two loops that never wait on each other, each under a
+// dead-man switch of its own (heartbeat.ts has the 2026-10-09 incident
+// that split them). Built here so the check-in and /healthz report its
+// health from their first answer; started once the daemon listens.
+const heartbeat = new Heartbeat({
+  db,
+  executor,
+  locks,
+  archiver,
+  watchers,
+  intervalSeconds: config.DORMICE_SCAN_INTERVAL_SECONDS,
+  stallAfterMs: STALL_AFTER_MS,
+  onStall: (loop, stalledForMs) => {
+    log.fatal(
+      { loop, stalledForMs },
+      `the ${loop} pass made no progress within the stall limit — crash-only exit, systemd brings us back`,
+    );
+    process.exit(1);
+  },
+  log,
 });
 
 // Managed swap exists exactly where the daemon can honor it: a Linux host
@@ -232,8 +254,19 @@ const checkIn = new CheckIn({
   intervalSeconds: config.DORMICE_CHECK_IN_INTERVAL_SECONDS,
   build,
   readReading: () =>
-    readNodeReading(db, checkInCpu, config.DORMICE_DATA_DIR, executor, swap),
+    readNodeReading(
+      db,
+      checkInCpu,
+      config.DORMICE_DATA_DIR,
+      executor,
+      swap,
+      heartbeat.health(),
+    ),
   configVersion: () => readConfigVersion(db),
+  // The boot switch's beat rides along for the bundle's pids sweep: it
+  // guards a bundle applied while the daemon boots (untilConfigured), and
+  // beats a stopped switch once it serves — a check-in's progress must not
+  // vouch for the lifecycle loops.
   applyConfig: (bundle) =>
     applyConfig(bundle, {
       db,
@@ -272,7 +305,31 @@ const app = buildApp({
   archiver,
   updater,
   watchers,
+  lifecycleHealth: () => heartbeat.health(),
 });
+
+// Reality, read once for the two boot steps that need all of it: the
+// container list is the one Docker read whose cost grows with the fleet
+// (LIST_DEADLINE_SECONDS: 88s for 2,600 containers on Beijing production,
+// 2026-10-09), and a boot that listed twice paid for it twice. Not
+// reading it fails the boot: the guard below must see reality before
+// anything destructive runs. The list's deadline is minutes, not the
+// 30s that once failed every boot of a loaded host into a restart loop.
+let reality: {
+  containers: Map<string, ContainerState>;
+  disks: string[];
+};
+try {
+  reality = {
+    containers: await executor.listContainers(),
+    disks: await executor.listDisks(),
+  };
+} catch (error) {
+  fatal(
+    `cannot read this host's sandboxes — ${error instanceof Error ? error.message : String(error)}; the startup guard and reconciliation need the full container list, and systemd retries the boot`,
+  );
+}
+beat();
 
 // Before trusting the pairing of this ledger and this reality, check it:
 // reconciliation destroys whatever the ledger disowns, so a daemon booted
@@ -280,13 +337,35 @@ const app = buildApp({
 // instead of erasing sandboxes it merely cannot see.
 const refusal = startupGuard({
   ledgerCount: locallyClaimedCount(listSandboxes(db)),
-  containers: await executor.listContainers(),
-  disks: await executor.listDisks(),
+  containers: reality.containers,
+  disks: reality.disks,
   executor: config.DORMICE_EXECUTOR,
 });
 if (refusal !== null) {
   fatal(refusal);
 }
+
+// Repair ledger/reality drift left by a crash — before serving traffic, so
+// every request runs against a ledger that reflects what actually exists —
+// over the reality the guard has just read: before listen nothing inserts
+// a row, so the guard's reading serves this pass too, and nothing in it
+// needs the configuration copy the steps below may wait for. A daemon that
+// cannot read reality does not pretend to manage it: a failed read failed
+// the boot above. A repair that fails is logged and left to the runtime
+// passes — one bad container must not keep a whole node from serving. The
+// archiver's restore tracker is empty at boot, so this pass is also what
+// repairs restoring zombies — before listen, so no request ever observes
+// one.
+const repaired = await reconcile(db, executor, locks, {
+  archiver,
+  watchers,
+  onProgress: beat,
+  reality,
+});
+for (const failure of repaired.failures) {
+  log.error(failure, 'startup reconcile: sandbox repair failed');
+}
+log.info(repaired, 'startup reconcile');
 
 // A node without a configuration copy has nothing to build a sandbox from
 // — no defaults, no templates, no archive store — so it does not listen
@@ -376,23 +455,6 @@ const diskGrower =
       })
     : undefined;
 
-// Repair ledger/reality drift left by a crash — before serving traffic, so
-// every request runs against a ledger that reflects what actually exists.
-// A failure here is fatal on purpose: a daemon that cannot read reality
-// should not pretend to manage it. The archiver's restore tracker is empty
-// at boot, so this pass is also what repairs restoring zombies — before
-// listen, so no request ever observes one.
-const repaired = await reconcile(
-  db,
-  executor,
-  locks,
-  undefined,
-  archiver,
-  watchers,
-  beat,
-);
-app.log.info(repaired, 'startup reconcile');
-
 // Running shells born under another cap follow the ledger now, in place.
 // Boot is one of the two moments the cap in force can differ from what a
 // running shell carries (the other is updateSettings, which sweeps itself):
@@ -415,6 +477,12 @@ app.log.info(
 // not configurable — a knob would be one typo away from 0.0.0.0. Exposing
 // the daemon to the outside world is a reverse proxy's job.
 await app.listen({ host: '127.0.0.1', port: config.DORMICE_PORT });
+
+// Booted: the boot switch hands over to the loops' own (heartbeat.ts),
+// whose first passes run one interval from now — the startup reconcile
+// has just run.
+bootWatchdog.stop();
+heartbeat.start();
 
 // The check-in ticker starts after listen on purpose: a check-in names
 // where the gateway may forward to and, from now on, reports a
@@ -443,17 +511,15 @@ log.info(
 const SHUTDOWN_GRACE_MS = 10_000;
 const connections = trackConnections(app.server);
 let closing = false;
-let heartbeatTimer: NodeJS.Timeout | undefined;
 let metricsTimer: NodeJS.Timeout | undefined;
 const close = async (signal: NodeJS.Signals) => {
   if (closing) return;
   closing = true;
   process.removeListener('SIGTERM', onSigterm);
   process.removeListener('SIGINT', onSigint);
-  clearTimeout(heartbeatTimer);
   clearTimeout(metricsTimer);
   checkIn.stop();
-  watchdog.stop();
+  heartbeat.stop();
   app.log.info(
     `${signal} received — shutting down (grace ${SHUTDOWN_GRACE_MS}ms)`,
   );
@@ -477,76 +543,12 @@ const onSigint = () => void close('SIGINT');
 process.once('SIGTERM', onSigterm);
 process.once('SIGINT', onSigint);
 
-// The daemon's heartbeat: reconcile, then scan. Reconciling every tick is
-// what keeps the ledger honest while the daemon runs — a sandbox whose
-// container died under it (a gVisor box exits whole on OOM, leaving an
-// exited container) is repaired within one interval instead of at the next
-// restart. Reconcile runs first so the scanner never trips over rows whose
-// containers moved without it.
-//
-// Ticks are chained instead of put on setInterval: a tick legitimately runs
-// long (a single freeze may spend 45s in memory.reclaim), and setInterval
-// would start the next tick on top of it — double freezes, repairs from
-// stale observations. The next tick is only scheduled when this one is done.
-//
-// Failures are logged, never fatal: the ledger is only written after
-// reality moved, so the next tick retries whatever failed.
-let suspects: ReadonlySet<string> = new Set();
-async function tick() {
-  beat();
-  try {
-    const drift = await reconcile(
-      db,
-      executor,
-      locks,
-      suspects,
-      archiver,
-      watchers,
-      beat,
-    );
-    suspects = new Set(drift.suspects);
-    if (
-      drift.repairedStates +
-        drift.deletedRows +
-        drift.destroyedOrphans +
-        drift.removedDisks +
-        drift.archivedSwept >
-      0
-    ) {
-      app.log.warn(drift, 'runtime reconcile repaired drift');
-    }
-    const scan = await scanOnce(
-      db,
-      executor,
-      locks,
-      new Date(),
-      archiver,
-      watchers,
-      beat,
-    );
-    for (const failure of scan.failures) {
-      app.log.error(failure, 'idle scan: sandbox transition failed');
-    }
-  } catch (error) {
-    app.log.error(error, 'heartbeat tick failed');
-  } finally {
-    beat();
-    if (!closing) {
-      heartbeatTimer = setTimeout(
-        tick,
-        config.DORMICE_SCAN_INTERVAL_SECONDS * 1000,
-      );
-    }
-  }
-}
-heartbeatTimer = setTimeout(tick, config.DORMICE_SCAN_INTERVAL_SECONDS * 1000);
-
 // The metrics sampler's own chained ticker — deliberately not a passenger
-// on the heartbeat, whose ticks legitimately run 45s+ (memory.reclaim) and
-// would turn the sampling cadence into jitter. The first shot fires
+// on a lifecycle loop, whose passes legitimately run 45s+ (memory.reclaim)
+// and would turn the sampling cadence into jitter. The first shot fires
 // immediately: a restart's gap in the curves should equal the downtime, not
-// downtime plus one interval. Same failure stance as the heartbeat: log,
-// never fatal, next tick retries.
+// downtime plus one interval. Same failure stance as the lifecycle loops:
+// log, never fatal, next tick retries.
 //
 // The ticker's private CpuSampler, primed here so even the immediate first
 // tick has a (short) interval to report on. Private because a CPU delta

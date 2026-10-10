@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { lifecycleHealthSchema } from './heartbeat';
 import {
   dataDiskSchema,
   hostReadingSchema,
@@ -103,6 +104,14 @@ export const nodeReadingSchema = z.object({
    * upgrade.
    */
   sandboxDisks: sandboxDisksSchema.optional(),
+  /**
+   * How the node's two lifecycle loops are doing (heartbeat.ts:
+   * lifecycleHealthSchema) — cooling and reconciliation, failed passes
+   * counted — so a node whose loops keep failing reads so in listNodes,
+   * not only in its journal. Optional on the wire for sandboxDisks'
+   * reason: a node on a build before 2026-10-10 reports without it.
+   */
+  lifecycle: lifecycleHealthSchema.optional(),
 });
 
 export type NodeReading = z.infer<typeof nodeReadingSchema>;

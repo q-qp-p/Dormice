@@ -61,6 +61,13 @@ if (process.env.DORMICE_DOCKER_CONTRACT === '1' && image) {
             .getContainer(containerName(sandboxId))
             .remove({ force: true });
         },
+        // The unordered-death analog: a SIGKILL straight through the
+        // engine, the exited container left as the runtime leaves it.
+        crashContainer: async (sandboxId: string) => {
+          const container = new Docker().getContainer(containerName(sandboxId));
+          await container.kill();
+          await container.wait({ condition: 'not-running' });
+        },
         baseImage: image,
         altImage: ALT_IMAGE,
         imageOf: async (sandboxId: string) => {
@@ -149,11 +156,13 @@ if (process.env.DORMICE_DOCKER_CONTRACT === '1' && image) {
         expect(await hostConfigCap()).toBe(512);
         expect(await cgroupCap()).toBe('512');
 
-        // A stopped shell: the verb leaves it alone, the update lands
-        // before start, and the started container runs under the new cap.
+        // An exited shell — what a death the daemon did not order leaves
+        // behind (stop() removes its own), and what the wake after such a
+        // death starts: the verb leaves it alone, the update lands before
+        // start, and the started container runs under the new cap.
         const lowered = withCap(1024);
-        await lowered.freeze(id);
-        await lowered.stop(id);
+        await container().kill();
+        await container().wait({ condition: 'not-running' });
         expect(await lowered.convergePidsLimit(id)).toBe('skipped');
         await lowered.start(id);
         // Set again on the warm start — the cgroup was recreated with it.

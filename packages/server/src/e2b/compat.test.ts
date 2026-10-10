@@ -439,7 +439,8 @@ describe('E2B control plane', () => {
       memory: false,
     });
     expect(res.statusCode).toBe(204);
-    expect(t.executor.stateOf(sandboxID)).toBe('stopped');
+    // Stopped is the disk alone: the shell went with its processes.
+    expect(t.executor.stateOf(sandboxID)).toBeUndefined();
     expect(findById(t.db, sandboxID)?.state).toBe('stopped');
   });
 
@@ -1868,9 +1869,11 @@ describe('E2B envd surface', () => {
       { watcherId },
     );
     // Container death owns physical finalization; goal-state remove is stable
-    // whether its exit conduction already arrived or is still in flight.
+    // whether its exit conduction already arrived or is still in flight —
+    // and touches no shell: stop() took it, nothing brought one back.
     expect(removed.statusCode).toBe(200);
-    expect(t.executor.stateOf(sandboxID)).toBe('stopped');
+    expect(t.executor.stateOf(sandboxID)).toBeUndefined();
+    expect(findById(t.db, sandboxID)?.state).toBe('stopped');
   });
 
   it('a polled watcher dies with its container: the next poll answers not_found', async () => {
