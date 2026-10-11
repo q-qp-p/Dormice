@@ -457,6 +457,12 @@ export class DockerExecutor implements Executor {
     if ((await this.inspect(sandboxId)) !== null) {
       throw new Error(`container ${sandboxId} already exists`);
     }
+    // The image before the disk: a pull can take minutes (a large
+    // template, up to PULL_DEADLINE_SECONDS), and a disk with neither a
+    // container nor a row is what the runtime reconciler removes as an
+    // orphan on its second pass — under a birth still waiting on its
+    // pull. A pull that fails then leaves nothing behind either.
+    await this.ensureImage(opts?.image ?? this.opts.baseImage());
     await this.provisionDisk(sandboxId, opts?.diskGb);
     await this.launchContainer(sandboxId, opts);
   }

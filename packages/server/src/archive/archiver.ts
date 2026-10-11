@@ -176,9 +176,10 @@ export class Archiver {
    * unconfirmed => every crash before the transition simply re-archives on
    * a later sweep (put overwrites the same key). The transition is the
    * confirmation; from there the local copy is cleanup — destroy, not
-   * removeDisk, because a stopped row still owns its exited container
-   * object, and "local copy freed" includes the shell (the next restore
-   * then rebuilds from the template's current image).
+   * removeDisk, because a stopped row may still own an exited container
+   * (a death's, before the reconciler removed it), and "local copy freed"
+   * includes the shell (the next restore then rebuilds from the
+   * template's current image).
    *
    * onPulse is the cooling loop's watchdog's ear: the scanner awaits this
    * whole transfer inside a cooling pass, and one big disk over a slow uplink

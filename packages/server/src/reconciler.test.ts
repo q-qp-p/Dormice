@@ -425,6 +425,64 @@ describe('runtime reconcile (two-strike orphans)', () => {
     expect(findByName(db, 'alice')).toBeUndefined();
   });
 
+  it('records a death on one pass and removes its exited shell on the next, the disk kept', async () => {
+    const { db, executor, locks } = setup();
+    const row = await seed(db, executor, 'alice');
+    executor.crashContainer(row.id, {
+      exitCode: 137,
+      oomKilled: true,
+      runtimeDied: false,
+    });
+
+    // The death first: the shell is the only witness of how it died.
+    const first = await reconcile(db, executor, locks, {
+      priorSuspects: new Set(),
+    });
+    expect(first).toEqual({ ...NONE, repairedStates: 1 });
+    expect(findByName(db, 'alice')).toMatchObject({
+      state: 'stopped',
+      lastExitCause: 'oom-killed',
+    });
+    expect(executor.stateOf(row.id)).toBe('stopped');
+
+    // On record now, so the shell goes; the sandbox is its disk.
+    const second = await reconcile(db, executor, locks, {
+      priorSuspects: new Set(),
+    });
+    expect(second).toEqual({ ...NONE, removedShells: 1 });
+    expect(executor.stateOf(row.id)).toBeUndefined();
+    expect(await executor.listDisks()).toContain(row.id);
+    expect(findByName(db, 'alice')).toMatchObject({
+      state: 'stopped',
+      lastExitCause: 'oom-killed',
+    });
+
+    // Nothing left to do: a shell-less stopped row is healthy.
+    expect(
+      await reconcile(db, executor, locks, { priorSuspects: new Set() }),
+    ).toEqual(NONE);
+  });
+
+  it('leaves exited shells under stopped rows to the runtime passes at startup', async () => {
+    const { db, executor, locks } = setup();
+    // An earlier build's stop: the row stopped, its exited shell kept.
+    const row = await seed(db, executor, 'alice');
+    executor.crashContainer(row.id, {
+      exitCode: 137,
+      oomKilled: false,
+      runtimeDied: false,
+    });
+    transition(db, row.id, 'frozen');
+    transition(db, row.id, 'stopped');
+
+    expect(await reconcile(db, executor, locks)).toEqual(NONE);
+    expect(executor.stateOf(row.id)).toBe('stopped');
+    expect(
+      await reconcile(db, executor, locks, { priorSuspects: new Set() }),
+    ).toEqual({ ...NONE, removedShells: 1 });
+    expect(executor.stateOf(row.id)).toBeUndefined();
+  });
+
   it('skips a row whose key is busy instead of repairing from a stale view', async () => {
     const { db, executor, locks } = setup();
     const row = await seed(db, executor, 'alice');

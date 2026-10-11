@@ -208,3 +208,39 @@ describe('stop', () => {
     expect(calls).toEqual(['inspect sbx-alice']);
   });
 });
+
+describe('create', () => {
+  it('a birth whose image cannot be had leaves no disk: the image is settled before the disk exists', async () => {
+    const calls: string[] = [];
+    const docker = {
+      getContainer(ref: string) {
+        return {
+          async inspect() {
+            calls.push(`inspect ${ref}`);
+            throw Object.assign(new Error('no such container'), {
+              statusCode: 404,
+            });
+          },
+        };
+      },
+      getImage(ref: string) {
+        return {
+          async inspect() {
+            calls.push(`inspect image ${ref}`);
+            throw Object.assign(new Error('no such image'), {
+              statusCode: 404,
+            });
+          },
+        };
+      },
+    } as unknown as Docker;
+
+    // No registry: the absent image is a refusal, and it comes before
+    // provisioning would touch dataDir (here /nonexistent — reaching it
+    // would fail with a different message).
+    await expect(executor(docker).create('alice')).rejects.toThrow(
+      'image unused is not on this host and the fleet has no registry',
+    );
+    expect(calls).toEqual(['inspect sbx-alice', 'inspect image unused']);
+  });
+});
